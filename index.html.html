@@ -1,0 +1,496 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Blood Debt - Multiplayer Combat Arena</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+        body {
+            margin: 0;
+            padding: 0;
+            overflow-x: hidden;
+        }
+        canvas {
+            display: block;
+        }
+    </style>
+</head>
+<body class="bg-gradient-to-br from-slate-900 via-purple-900 to-slate-900 min-h-screen">
+    <div id="app"></div>
+
+    <script>
+        // Simple storage system (using localStorage)
+        const storage = {
+            async get(key, shared) {
+                const data = localStorage.getItem(key);
+                return data ? { key, value: data, shared } : null;
+            },
+            async set(key, value, shared) {
+                localStorage.setItem(key, value);
+                return { key, value, shared };
+            },
+            async delete(key, shared) {
+                localStorage.removeItem(key);
+                return { key, deleted: true, shared };
+            }
+        };
+
+        // Game state
+        let screen = 'home';
+        let gameId = '';
+        let playerId = Math.random().toString(36).substr(2, 9);
+        let playerName = '';
+        let gameState = null;
+        let position = { x: 400, y: 300 };
+        let health = 100;
+        let keysPressed = {};
+        let lastUpdate = Date.now();
+        let canvas = null;
+        let ctx = null;
+
+        // Generate unique ID
+        function generateId() {
+            return Math.random().toString(36).substr(2, 9);
+        }
+
+        // Create new game
+        async function createGame() {
+            if (!playerName.trim()) {
+                alert('Please enter your name!');
+                return;
+            }
+
+            const newGameId = generateId();
+            const newGame = {
+                id: newGameId,
+                host: playerId,
+                players: {
+                    [playerId]: {
+                        name: playerName,
+                        x: 400,
+                        y: 300,
+                        health: 100,
+                        kills: 0,
+                        deaths: 0
+                    }
+                },
+                started: false,
+                createdAt: Date.now()
+            };
+
+            try {
+                await storage.set(`game:${newGameId}`, JSON.stringify(newGame), true);
+                gameId = newGameId;
+                gameState = newGame;
+                screen = 'lobby';
+                render();
+            } catch (error) {
+                console.error('Failed to create game:', error);
+                alert('Failed to create game. Please try again.');
+            }
+        }
+
+        // Join existing game
+        async function joinGame(inputGameId) {
+            if (!playerName.trim()) {
+                alert('Please enter your name!');
+                return;
+            }
+
+            try {
+                const result = await storage.get(`game:${inputGameId}`, true);
+                if (!result) {
+                    alert('Game not found!');
+                    return;
+                }
+
+                const game = JSON.parse(result.value);
+                
+                if (game.started) {
+                    alert('Game already in progress!');
+                    return;
+                }
+
+                game.players[playerId] = {
+                    name: playerName,
+                    x: Math.random() * 700 + 50,
+                    y: Math.random() * 500 + 50,
+                    health: 100,
+                    kills: 0,
+                    deaths: 0
+                };
+
+                await storage.set(`game:${inputGameId}`, JSON.stringify(game), true);
+                gameId = inputGameId;
+                gameState = game;
+                screen = 'lobby';
+                render();
+            } catch (error) {
+                console.error('Failed to join game:', error);
+                alert('Failed to join game. Please try again.');
+            }
+        }
+
+        // Start game
+        async function startGame() {
+            if (gameState.host !== playerId) return;
+
+            const updatedGame = { ...gameState, started: true };
+            try {
+                await storage.set(`game:${gameId}`, JSON.stringify(updatedGame), true);
+                gameState = updatedGame;
+                screen = 'game';
+                render();
+                startGameLoop();
+            } catch (error) {
+                console.error('Failed to start game:', error);
+            }
+        }
+
+        // Leave game
+        function leaveGame() {
+            screen = 'home';
+            gameId = '';
+            gameState = null;
+            render();
+        }
+
+        // Copy game ID
+        function copyGameId() {
+            navigator.clipboard.writeText(gameId);
+            alert('Game ID copied to clipboard!');
+        }
+
+        // Attack function
+        async function attack() {
+            if (!gameState) return;
+
+            try {
+                const result = await storage.get(`game:${gameId}`, true);
+                if (!result) return;
+
+                const game = JSON.parse(result.value);
+                const attackRange = 50;
+
+                Object.entries(game.players).forEach(([pid, player]) => {
+                    if (pid === playerId) return;
+
+                    const dx = player.x - position.x;
+                    const dy = player.y - position.y;
+                    const distance = Math.sqrt(dx * dx + dy * dy);
+
+                    if (distance < attackRange && player.health > 0) {
+                        player.health = Math.max(0, player.health - 20);
+                        
+                        if (player.health === 0) {
+                            game.players[playerId].kills += 1;
+                            player.deaths += 1;
+                            setTimeout(async () => {
+                                player.health = 100;
+                                player.x = Math.random() * 700 + 50;
+                                player.y = Math.random() * 500 + 50;
+                                await storage.set(`game:${gameId}`, JSON.stringify(game), true);
+                            }, 3000);
+                        }
+                    }
+                });
+
+                await storage.set(`game:${gameId}`, JSON.stringify(game), true);
+            } catch (error) {
+                console.log('Attack error:', error);
+            }
+        }
+
+        // Game loop
+        function startGameLoop() {
+            setInterval(drawGame, 1000 / 60);
+            setInterval(updatePosition, 50);
+        }
+
+        async function updatePosition() {
+            if (screen !== 'game' || !gameState) return;
+
+            const now = Date.now();
+            const delta = (now - lastUpdate) / 1000;
+            lastUpdate = now;
+
+            let newX = position.x;
+            let newY = position.y;
+            const speed = 200 * delta;
+
+            if (keysPressed['w'] || keysPressed['arrowup']) newY -= speed;
+            if (keysPressed['s'] || keysPressed['arrowdown']) newY += speed;
+            if (keysPressed['a'] || keysPressed['arrowleft']) newX -= speed;
+            if (keysPressed['d'] || keysPressed['arrowright']) newX += speed;
+
+            newX = Math.max(20, Math.min(780, newX));
+            newY = Math.max(20, Math.min(580, newY));
+
+            if (newX !== position.x || newY !== position.y) {
+                position = { x: newX, y: newY };
+
+                try {
+                    const result = await storage.get(`game:${gameId}`, true);
+                    if (result) {
+                        const game = JSON.parse(result.value);
+                        if (game.players[playerId]) {
+                            game.players[playerId].x = newX;
+                            game.players[playerId].y = newY;
+                            await storage.set(`game:${gameId}`, JSON.stringify(game), true);
+                        }
+                    }
+                } catch (error) {
+                    console.log('Position update error:', error);
+                }
+            }
+        }
+
+        function drawGame() {
+            if (screen !== 'game' || !canvas || !gameState) return;
+
+            ctx.fillStyle = '#1a1a2e';
+            ctx.fillRect(0, 0, 800, 600);
+
+            // Draw grid
+            ctx.strokeStyle = '#16213e';
+            ctx.lineWidth = 1;
+            for (let i = 0; i < 800; i += 40) {
+                ctx.beginPath();
+                ctx.moveTo(i, 0);
+                ctx.lineTo(i, 600);
+                ctx.stroke();
+            }
+            for (let i = 0; i < 600; i += 40) {
+                ctx.beginPath();
+                ctx.moveTo(0, i);
+                ctx.lineTo(800, i);
+                ctx.stroke();
+            }
+
+            // Draw players
+            Object.entries(gameState.players).forEach(([pid, player]) => {
+                if (player.health <= 0) return;
+
+                const isMe = pid === playerId;
+                
+                ctx.fillStyle = isMe ? '#00d9ff' : '#ff0055';
+                ctx.beginPath();
+                ctx.arc(player.x, player.y, 20, 0, Math.PI * 2);
+                ctx.fill();
+
+                // Health bar
+                ctx.fillStyle = '#333';
+                ctx.fillRect(player.x - 25, player.y - 35, 50, 6);
+                ctx.fillStyle = player.health > 50 ? '#00ff00' : player.health > 25 ? '#ffaa00' : '#ff0000';
+                ctx.fillRect(player.x - 25, player.y - 35, (player.health / 100) * 50, 6);
+
+                // Name
+                ctx.fillStyle = '#fff';
+                ctx.font = '12px Arial';
+                ctx.textAlign = 'center';
+                ctx.fillText(player.name, player.x, player.y - 40);
+            });
+        }
+
+        // Update game state periodically
+        setInterval(async () => {
+            if (!gameId) return;
+
+            try {
+                const result = await storage.get(`game:${gameId}`, true);
+                if (result) {
+                    const game = JSON.parse(result.value);
+                    gameState = game;
+                    
+                    if (game.players[playerId]) {
+                        health = game.players[playerId].health;
+                    }
+
+                    if (game.started && screen === 'lobby') {
+                        screen = 'game';
+                        render();
+                        startGameLoop();
+                    }
+
+                    if (screen === 'lobby') {
+                        render();
+                    }
+                }
+            } catch (error) {
+                console.log('Game state check:', error);
+            }
+        }, 1000);
+
+        // Keyboard events
+        document.addEventListener('keydown', (e) => {
+            keysPressed[e.key.toLowerCase()] = true;
+            
+            if (e.key === ' ' && screen === 'game') {
+                e.preventDefault();
+                attack();
+            }
+        });
+
+        document.addEventListener('keyup', (e) => {
+            keysPressed[e.key.toLowerCase()] = false;
+        });
+
+        // Render function
+        function render() {
+            const app = document.getElementById('app');
+
+            if (screen === 'home') {
+                app.innerHTML = `
+                    <div class="flex items-center justify-center min-h-screen">
+                        <div class="bg-slate-800 p-8 rounded-lg shadow-2xl max-w-md w-full border border-purple-500 m-4">
+                            <div class="text-center mb-8">
+                                <svg class="w-16 h-16 mx-auto mb-4 text-red-500" fill="currentColor" viewBox="0 0 24 24">
+                                    <path d="M20 2H4c-1.1 0-2 .9-2 2v18l4-4h14c1.1 0 2-.9 2-2V4c0-1.1-.9-2-2-2zm-7 12h-2v-2h2v2zm0-4h-2V6h2v4z"/>
+                                </svg>
+                                <h1 class="text-4xl font-bold text-white mb-2">Blood Debt</h1>
+                                <p class="text-gray-400">Multiplayer Combat Arena</p>
+                            </div>
+
+                            <div class="space-y-4">
+                                <input
+                                    type="text"
+                                    id="playerNameInput"
+                                    placeholder="Enter your name"
+                                    class="w-full px-4 py-3 bg-slate-700 border border-slate-600 rounded text-white focus:outline-none focus:border-purple-500"
+                                />
+
+                                <button
+                                    onclick="playerName = document.getElementById('playerNameInput').value; createGame()"
+                                    class="w-full bg-purple-600 hover:bg-purple-700 text-white font-bold py-3 px-4 rounded transition"
+                                >
+                                    🎮 Create New Game
+                                </button>
+
+                                <div class="relative">
+                                    <div class="absolute inset-0 flex items-center">
+                                        <div class="w-full border-t border-slate-600"></div>
+                                    </div>
+                                    <div class="relative flex justify-center text-sm">
+                                        <span class="px-2 bg-slate-800 text-gray-400">or</span>
+                                    </div>
+                                </div>
+
+                                <input
+                                    type="text"
+                                    id="gameIdInput"
+                                    placeholder="Enter Game ID to join"
+                                    class="w-full px-4 py-3 bg-slate-700 border border-slate-600 rounded text-white focus:outline-none focus:border-purple-500"
+                                    onkeypress="if(event.key === 'Enter') { playerName = document.getElementById('playerNameInput').value; joinGame(this.value); }"
+                                />
+                            </div>
+                        </div>
+                    </div>
+                `;
+            } else if (screen === 'lobby') {
+                const playersList = Object.entries(gameState.players).map(([pid, player]) => `
+                    <div class="flex items-center justify-between bg-slate-600 p-3 rounded">
+                        <span class="text-white">${player.name}</span>
+                        ${pid === gameState.host ? '<span class="bg-yellow-500 text-black px-2 py-1 rounded text-xs font-bold">HOST</span>' : ''}
+                    </div>
+                `).join('');
+
+                app.innerHTML = `
+                    <div class="flex items-center justify-center min-h-screen">
+                        <div class="bg-slate-800 p-8 rounded-lg shadow-2xl max-w-2xl w-full border border-purple-500 m-4">
+                            <div class="text-center mb-6">
+                                <h2 class="text-3xl font-bold text-white mb-2">Game Lobby</h2>
+                            </div>
+
+                            <div class="bg-slate-700 p-4 rounded mb-6 flex items-center justify-between">
+                                <div>
+                                    <p class="text-gray-400 text-sm">Game ID</p>
+                                    <p class="text-white font-mono text-lg">${gameId}</p>
+                                </div>
+                                <button
+                                    onclick="copyGameId()"
+                                    class="bg-purple-600 hover:bg-purple-700 text-white px-4 py-2 rounded transition"
+                                >
+                                    📋 Copy
+                                </button>
+                            </div>
+
+                            <div class="bg-slate-700 p-4 rounded mb-6">
+                                <h3 class="text-white font-bold mb-3">
+                                    👥 Players (${Object.keys(gameState.players).length})
+                                </h3>
+                                <div class="space-y-2">
+                                    ${playersList}
+                                </div>
+                            </div>
+
+                            <div class="space-y-3">
+                                ${gameState.host === playerId ? `
+                                    <button
+                                        onclick="startGame()"
+                                        class="w-full bg-green-600 hover:bg-green-700 text-white font-bold py-3 px-4 rounded transition"
+                                    >
+                                        ▶️ Start Game
+                                    </button>
+                                ` : ''}
+                                
+                                <button
+                                    onclick="leaveGame()"
+                                    class="w-full bg-slate-600 hover:bg-slate-700 text-white font-bold py-3 px-4 rounded transition"
+                                >
+                                    🏠 Leave Lobby
+                                </button>
+                            </div>
+
+                            <p class="text-gray-400 text-sm text-center mt-6">
+                                Share the Game ID with friends to let them join!
+                            </p>
+                        </div>
+                    </div>
+                `;
+            } else if (screen === 'game') {
+                const kills = gameState.players[playerId]?.kills || 0;
+                const deaths = gameState.players[playerId]?.deaths || 0;
+
+                app.innerHTML = `
+                    <div class="flex flex-col items-center justify-center min-h-screen p-4">
+                        <div class="bg-slate-800 p-6 rounded-lg shadow-2xl border border-purple-500">
+                            <div class="flex justify-between items-center mb-4">
+                                <div class="flex items-center gap-4">
+                                    <div class="flex items-center gap-2 text-white">
+                                        <span>❤️</span>
+                                        <span class="font-bold">${health}</span>
+                                    </div>
+                                    <div class="text-white">
+                                        <span class="text-green-400">${kills}</span> / 
+                                        <span class="text-red-400">${deaths}</span>
+                                    </div>
+                                </div>
+                                <button
+                                    onclick="leaveGame()"
+                                    class="bg-red-600 hover:bg-red-700 text-white px-4 py-2 rounded transition"
+                                >
+                                    Leave Game
+                                </button>
+                            </div>
+
+                            <canvas id="gameCanvas" width="800" height="600" class="border-2 border-purple-500 rounded"></canvas>
+
+                            <div class="mt-4 text-center text-gray-300 text-sm">
+                                <p>WASD or Arrow Keys to move • SPACE to attack</p>
+                                <p class="text-xs text-gray-400 mt-2">Stay close to enemies and press SPACE to deal damage!</p>
+                            </div>
+                        </div>
+                    </div>
+                `;
+
+                canvas = document.getElementById('gameCanvas');
+                ctx = canvas.getContext('2d');
+            }
+        }
+
+        // Initial render
+        render();
+    </script>
+</body>
+</html>
